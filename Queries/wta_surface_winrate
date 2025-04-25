@@ -1,0 +1,81 @@
+let
+    // Load match data
+    MatchSource = Csv.Document(File.Contents("C:\Projects\BI_and_Analytics\BI-Analytics-Tennis\Data\wta_matches_2024.csv"), [Delimiter=",", Columns=49, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+    MatchHeaders = Table.PromoteHeaders(MatchSource, [PromoteAllScalars=true]),
+    MatchTyped = Table.TransformColumnTypes(MatchHeaders, {
+        {"surface", type text}, {"winner_id", Int64.Type}, {"winner_name", type text},
+        {"loser_id", Int64.Type}, {"loser_name", type text}
+    }),
+
+    // Filter out blank surfaces
+    FilteredSurface = Table.SelectRows(MatchTyped, each Text.Trim([surface]) <> ""),
+
+    // Winner data
+    WinnerTable = Table.SelectColumns(FilteredSurface, {"surface", "winner_name", "winner_id"}),
+    WinnerFlagged = Table.AddColumn(WinnerTable, "Win", each 1),
+    WinnerRenamed = Table.RenameColumns(WinnerFlagged, {
+        {"winner_name", "player_name"}, {"winner_id", "player_id"}
+    }),
+
+    // Loser data
+    LoserTable = Table.SelectColumns(FilteredSurface, {"surface", "loser_name", "loser_id"}),
+    LoserFlagged = Table.AddColumn(LoserTable, "Win", each 0),
+    LoserRenamed = Table.RenameColumns(LoserFlagged, {
+        {"loser_name", "player_name"}, {"loser_id", "player_id"}
+    }),
+
+    // Combine winners and losers
+    Combined = Table.Combine({WinnerRenamed, LoserRenamed}),
+
+    // Clean player names and surface text
+    Cleaned = Table.TransformColumns(Combined, {
+        {"player_name", each Text.Proper(Text.Trim(_)), type text},
+        {"surface", each Text.Proper(Text.Trim(_)), type text}
+    }),
+
+    // Group by player + surface
+    GroupedSurface = Table.Group(Cleaned, {"player_id", "player_name", "surface"}, {
+        {"Matches", each Table.RowCount(_), Int64.Type},
+        {"Wins", each List.Sum([Win]), Int64.Type}
+    }),
+
+    // Add win rate
+    WithWinRate = Table.AddColumn(GroupedSurface, "WinRate", each [Wins] / [Matches], type number),
+
+    // Compute total matches per player (across surfaces)
+    TotalMatches = Table.Group(Cleaned, {"player_id"}, {
+        {"TotalMatches", each Table.RowCount(_), Int64.Type}
+    }),
+
+    // Join total matches into grouped table
+    WithTotals = Table.NestedJoin(WithWinRate, {"player_id"}, TotalMatches, {"player_id"}, "Total", JoinKind.LeftOuter),
+    ExpandedTotals = Table.ExpandTableColumn(WithTotals, "Total", {"TotalMatches"}),
+
+    // Filter for surface matches ≥ 2 and total matches ≥ 20
+    Filtered = Table.SelectRows(ExpandedTotals, each [Matches] >= 2 and [TotalMatches] >= 20),
+
+    // Load ranking data
+    RankSource = Csv.Document(File.Contents("C:\Projects\BI_and_Analytics\BI-Analytics-Tennis\Data\wta_rankings_current.csv"), [Delimiter=",", Columns=5, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+    RankHeaders = Table.PromoteHeaders(RankSource, [PromoteAllScalars=true]),
+    RankTyped = Table.TransformColumnTypes(RankHeaders, {
+        {"ranking_date", Int64.Type}, {"rank", Int64.Type}, {"player", Int64.Type},
+        {"points", Int64.Type}, {"tours", Int64.Type}
+    }),
+
+    // Get latest rank per player (assumes most recent row has latest ranking)
+    RankedSorted = Table.Sort(RankTyped, {{"ranking_date", Order.Descending}}),
+    LatestRanks = Table.Group(RankedSorted, {"player"}, {{"Latest", each Table.FirstN(_, 1)}}),
+    FlattenedRanks = Table.ExpandTableColumn(LatestRanks, "Latest", {"rank"}),
+
+    // Join ranks into player table
+    RankedJoined = Table.NestedJoin(Filtered, {"player_id"}, FlattenedRanks, {"player"}, "RankInfo", JoinKind.LeftOuter),
+    ExpandedRanks = Table.ExpandTableColumn(RankedJoined, "RankInfo", {"rank"}, {"CurrentRank"}),
+
+    // Final sort by rank (optional)
+    Sorted = Table.Sort(ExpandedRanks, {{"CurrentRank", Order.Ascending}}),
+
+    // Add DisplayName: "Player Name - Rank X"
+    WithDisplayName = Table.AddColumn(Sorted, "DisplayName", each [player_name] & " - Rank " & Text.From([CurrentRank]), type text),
+    #"Renamed Columns" = Table.RenameColumns(WithDisplayName,{{"DisplayName", "Player - 2024 Rank"}})
+in
+    #"Renamed Columns"

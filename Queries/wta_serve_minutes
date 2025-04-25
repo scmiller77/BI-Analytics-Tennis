@@ -1,0 +1,67 @@
+let
+    // Load match data
+    MatchSource = Csv.Document(File.Contents("C:\Projects\BI_and_Analytics\BI-Analytics-Tennis\Data\wta_matches_2024.csv"), [Delimiter=",", Columns=49, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+    MatchHeaders = Table.PromoteHeaders(MatchSource, [PromoteAllScalars=true]),
+    MatchTyped = Table.TransformColumnTypes(MatchHeaders, {
+        {"winner_id", Int64.Type}, {"winner_name", type text}, {"w_ace", Int64.Type},
+        {"w_1stIn", Int64.Type}, {"w_1stWon", Int64.Type}, {"w_svpt", Int64.Type},
+        {"loser_id", Int64.Type}, {"loser_name", type text}, {"l_ace", Int64.Type},
+        {"l_1stIn", Int64.Type}, {"l_1stWon", Int64.Type}, {"l_svpt", Int64.Type},
+        {"minutes", Int64.Type}, {"w_bpSaved", Int64.Type}, {"w_bpFaced", Int64.Type},
+        {"l_bpSaved", Int64.Type}, {"l_bpFaced", Int64.Type}
+    }),
+
+    // Winner stats
+    WinnerStats = Table.SelectColumns(MatchTyped, {
+        "winner_id", "winner_name", "w_ace", "w_1stIn", "w_1stWon", "w_svpt", "minutes", "w_bpSaved", "w_bpFaced"
+    }),
+    WinnerCalc = Table.AddColumn(WinnerStats, "player_data", each [
+        player_id = [winner_id],
+        player_name = [winner_name],
+        aces = [w_ace],
+        first_serve_pct = if [w_svpt] <> null and [w_svpt] > 0 then Number.From([w_1stIn]) / [w_svpt] else null,
+        first_serve_win_pct = if [w_1stIn] <> null and [w_1stIn] > 0 then Number.From([w_1stWon]) / [w_1stIn] else null,
+        total_minutes = [minutes],
+        clutch_factor = if [w_bpFaced] <> null and [w_bpFaced] > 0 then Number.From([w_bpSaved]) / [w_bpFaced] else null
+    ]),
+    WinnerExpanded = Table.ExpandRecordColumn(WinnerCalc, "player_data", {
+        "player_id", "player_name", "aces", "first_serve_pct", "first_serve_win_pct", "total_minutes", "clutch_factor"
+    }),
+
+    // Loser stats
+    LoserStats = Table.SelectColumns(MatchTyped, {
+        "loser_id", "loser_name", "l_ace", "l_1stIn", "l_1stWon", "l_svpt", "minutes", "l_bpSaved", "l_bpFaced"
+    }),
+    LoserCalc = Table.AddColumn(LoserStats, "player_data", each [
+        player_id = [loser_id],
+        player_name = [loser_name],
+        aces = [l_ace],
+        first_serve_pct = if [l_svpt] <> null and [l_svpt] > 0 then Number.From([l_1stIn]) / [l_svpt] else null,
+        first_serve_win_pct = if [l_1stIn] <> null and [l_1stIn] > 0 then Number.From([l_1stWon]) / [l_1stIn] else null,
+        total_minutes = [minutes],
+        clutch_factor = if [l_bpFaced] <> null and [l_bpFaced] > 0 then Number.From([l_bpSaved]) / [l_bpFaced] else null
+    ]),
+    LoserExpanded = Table.ExpandRecordColumn(LoserCalc, "player_data", {
+        "player_id", "player_name", "aces", "first_serve_pct", "first_serve_win_pct", "total_minutes", "clutch_factor"
+    }),
+
+    // Combine all player stats (winners + losers)
+    Combined = Table.Combine({WinnerExpanded, LoserExpanded}),
+
+    // Group by player and compute stats
+    Grouped = Table.Group(Combined, {"player_id", "player_name"}, {
+        {"Matches", each Table.RowCount(_), Int64.Type},
+        {"Avg_FirstServePct", each List.Average(List.RemoveNulls([first_serve_pct])), type number},
+        {"Avg_FirstServeWinPct", each List.Average(List.RemoveNulls([first_serve_win_pct])), type number},
+        {"Avg_AcesPerMatch", each List.Average(List.RemoveNulls([aces])), type number},
+        {"TotalMinutes", each List.Sum([total_minutes]), Int64.Type},
+        {"AvgClutchFactor", each List.Average(List.RemoveNulls([clutch_factor])), type number}
+    }),
+
+    // Optional: Only show players with more than 5 matches
+    Filtered = Table.SelectRows(Grouped, each [Matches] > 5),
+
+    // Sort descending by 1st serve win %
+    Sorted = Table.Sort(Filtered,{{"AvgClutchFactor", Order.Descending}})
+in
+    Sorted

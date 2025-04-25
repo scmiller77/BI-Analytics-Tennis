@@ -1,0 +1,86 @@
+let
+    // Load data
+    MatchSource = Csv.Document(File.Contents("C:\Projects\BI_and_Analytics\BI-Analytics-Tennis\Data\wta_matches_2024.csv"), [Delimiter=",", Columns=49, Encoding=1252, QuoteStyle=QuoteStyle.None]),
+    MatchHeaders = Table.PromoteHeaders(MatchSource, [PromoteAllScalars=true]),
+    MatchTyped = Table.TransformColumnTypes(MatchHeaders, {
+        {"winner_id", Int64.Type}, {"winner_name", type text}, {"winner_hand", type text},
+        {"loser_id", Int64.Type}, {"loser_name", type text}, {"loser_hand", type text}
+    }),
+
+    // Filter only rows with handedness present
+    Filtered = Table.SelectRows(MatchTyped, each Text.Trim([winner_hand]) <> "" and Text.Trim([loser_hand]) <> ""),
+
+    // Winner perspective
+    Winners = Table.SelectColumns(Filtered, {"winner_id", "winner_name", "winner_hand", "loser_hand"}),
+    WinnersRenamed = Table.RenameColumns(Winners, {
+        {"winner_id", "player_id"}, {"winner_name", "player_name"}, {"winner_hand", "player_hand"}, {"loser_hand", "opponent_hand"}
+    }),
+    WinnersFlagged = Table.AddColumn(WinnersRenamed, "Win", each 1),
+
+    // Loser perspective
+    Losers = Table.SelectColumns(Filtered, {"loser_id", "loser_name", "loser_hand", "winner_hand"}),
+    LosersRenamed = Table.RenameColumns(Losers, {
+        {"loser_id", "player_id"}, {"loser_name", "player_name"}, {"loser_hand", "player_hand"}, {"winner_hand", "opponent_hand"}
+    }),
+    LosersFlagged = Table.AddColumn(LosersRenamed, "Win", each 0),
+
+    // Combine all matches
+    AllMatches = Table.Combine({WinnersFlagged, LosersFlagged}),
+
+    // Clean for only L or R
+    HandFiltered = Table.SelectRows(AllMatches, each ([player_hand] = "L" or [player_hand] = "R") and ([opponent_hand] = "L" or [opponent_hand] = "R")),
+
+    // Matches vs LEFT
+    MatchesVsLeft = Table.SelectRows(HandFiltered, each [opponent_hand] = "L"),
+    GroupLeft = Table.Group(MatchesVsLeft, {"player_id", "player_name", "player_hand"}, {
+        {"Matches_vs_Left", each Table.RowCount(_), Int64.Type},
+        {"Wins_vs_Left", each List.Sum([Win]), Int64.Type}
+    }),
+
+    // Matches vs RIGHT
+    MatchesVsRight = Table.SelectRows(HandFiltered, each [opponent_hand] = "R"),
+    GroupRight = Table.Group(MatchesVsRight, {"player_id", "player_name", "player_hand"}, {
+        {"Matches_vs_Right", each Table.RowCount(_), Int64.Type},
+        {"Wins_vs_Right", each List.Sum([Win]), Int64.Type}
+    }),
+
+    // Join both tables together
+    CombinedStats = Table.NestedJoin(GroupLeft, {"player_id"}, GroupRight, {"player_id"}, "RightStats", JoinKind.FullOuter),
+    Expanded = Table.ExpandTableColumn(CombinedStats, "RightStats", {
+        "player_name", "player_hand", "Matches_vs_Right", "Wins_vs_Right"
+    }, {
+        "player_name_right", "player_hand_right", "Matches_vs_Right", "Wins_vs_Right"
+    }),
+
+    // Fill missing values with 0
+    Filled = Table.TransformColumns(Expanded, {
+        {"Matches_vs_Left", each if _ = null then 0 else _, Int64.Type},
+        {"Wins_vs_Left", each if _ = null then 0 else _, Int64.Type},
+        {"Matches_vs_Right", each if _ = null then 0 else _, Int64.Type},
+        {"Wins_vs_Right", each if _ = null then 0 else _, Int64.Type}
+    }),
+
+    // Remove conflicting name and hand columns before merging
+    RemovedDuplicates = Table.RemoveColumns(Filled, {"player_name", "player_hand"}),
+
+    // Combine names and hands from left/right sources
+    PlayerName = Table.AddColumn(RemovedDuplicates, "player_name", each if [player_name_right] <> null then [player_name_right] else null),
+    PlayerHand = Table.AddColumn(PlayerName, "player_hand", each if [player_hand_right] <> null then [player_hand_right] else null),
+
+    AddWinRateLeft = Table.AddColumn(PlayerHand, "Win_Rate_vs_Left", each if [Matches_vs_Left] > 4 then [Wins_vs_Left] / [Matches_vs_Left] else null, type number),
+    AddWinRateRight = Table.AddColumn(AddWinRateLeft, "Win_Rate_vs_Right", each if [Matches_vs_Right] > 4 then [Wins_vs_Right] / [Matches_vs_Right] else null, type number),
+
+    // Final cleanup
+    RemoveExtras = Table.SelectColumns(AddWinRateRight, {
+        "player_id", "player_name", "player_hand", 
+        "Wins_vs_Left", "Matches_vs_Left", "Win_Rate_vs_Left", 
+        "Wins_vs_Right", "Matches_vs_Right", "Win_Rate_vs_Right"
+    }),
+
+    // Optional: Only keep players with more than 20 matches total
+    Final = Table.SelectRows(RemoveExtras, each ([Matches_vs_Left] + [Matches_vs_Right]) > 20),
+    #"Sorted Rows" = Table.Sort(Final,{{"Wins_vs_Right", Order.Descending}, {"Win_Rate_vs_Left", Order.Descending}}),
+    #"Filtered Rows" = Table.SelectRows(#"Sorted Rows", each true),
+    #"Sorted Rows1" = Table.Sort(#"Filtered Rows",{{"Win_Rate_vs_Left", Order.Descending}})
+in
+    #"Sorted Rows1"
